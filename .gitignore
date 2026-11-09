@@ -1,0 +1,14 @@
+# Local settings: holds the API key
+config.json
+config.tmp
+
+# Personal data
+history/
+dictation.log
+
+.venv/
+__pycache__/
+desktop.ini
+
+# Legacy Tk version, replaced by qt_main.py
+main.py
