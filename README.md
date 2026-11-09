@@ -10,7 +10,7 @@ Requires Windows and Python 3.12+.
 start_dictation.bat
 ```
 
-The first run creates a local `.venv` and installs `requirements.txt`.
+The first run creates a local `.venv`, installs `requirements.txt` and adds a **Dictation Typer** shortcut to your desktop. Use that shortcut from then on: it opens the app with no console window. Run the `.bat` again if you move the folder or update the requirements.
 
 ## API key
 

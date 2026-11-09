@@ -2,6 +2,7 @@ import ctypes
 from ctypes import wintypes
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import sys
@@ -18,8 +19,8 @@ from assemblyai.streaming.v3 import (
 )
 import numpy as np
 import pyaudiowpatch as pyaudio
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QGuiApplication, QPainter, QPen
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QGuiApplication, QIcon, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -37,6 +38,7 @@ APP_DIR = Path(__file__).resolve().parent
 LOCAL_CONFIG = APP_DIR / "config.json"
 HISTORY_DIR = APP_DIR / "history"
 LOG_FILE = APP_DIR / "dictation.log"
+ICON_FILE = APP_DIR / "assets" / "icon.ico"
 API_KEYS_URL = "https://www.assemblyai.com/dashboard"
 
 CHUNK_SIZE = 4096
@@ -190,6 +192,38 @@ class AppSignals(QObject):
     stopped = Signal()
 
 
+class GearButton(QPushButton):
+    """Thin-stroke gear drawn in code, to match the flat UI (the emoji gear has shading)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFixedSize(16, 16)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def enterEvent(self, event) -> None:
+        self.update()
+
+    def leaveEvent(self, event) -> None:
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        color = QColor(226, 232, 240, 210 if self.underMouse() else 110)
+        center = QPointF(self.width() / 2, self.height() / 2)
+        pen = QPen(color, 1.3)
+        painter.setPen(pen)
+        painter.drawEllipse(center, 4.2, 4.2)
+        painter.drawEllipse(center, 1.5, 1.5)
+        pen.setWidthF(2.0)
+        pen.setCapStyle(Qt.FlatCap)
+        painter.setPen(pen)
+        for step in range(8):
+            angle = step * math.pi / 4
+            direction = QPointF(math.cos(angle), math.sin(angle))
+            painter.drawLine(center + direction * 4.6, center + direction * 6.6)
+
+
 class Waveform(QWidget):
     def __init__(self) -> None:
         super().__init__()
@@ -324,11 +358,9 @@ class DictationWindow(QWidget):
         labels.addWidget(self.hint_label)
         header.addLayout(labels, 1)
 
-        self.settings_button = QPushButton(chr(0x2699))
-        self.settings_button.setFixedSize(16, 16)
+        self.settings_button = GearButton()
         self.settings_button.setToolTip("API key")
         self.settings_button.clicked.connect(self.toggle_settings)
-        self.settings_button.setStyleSheet(self.language_style().replace("10px", "13px"))
         header.addWidget(self.settings_button, 0, Qt.AlignTop)
 
         self.minimize_button = QPushButton("")
@@ -821,7 +853,10 @@ def main() -> int:
     # pythonw has no console, so errors would otherwise vanish; this file is what to check when something fails.
     logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     sys.excepthook = lambda *exc: logging.error("Unhandled error", exc_info=exc)
+    # Own taskbar identity, so Windows shows our icon instead of grouping under pythonw.exe.
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DictationTyper")
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(str(ICON_FILE)))
     window = DictationWindow()
     window.show()
     return app.exec()
