@@ -51,6 +51,8 @@ MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 VK_D = 0x44
 WM_HOTKEY = 0x0312
+SW_RESTORE = 9
+ERROR_ALREADY_EXISTS = 183
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -873,7 +875,7 @@ class DictationWindow(QWidget):
     def hotkey_loop(self) -> None:
         self.hotkey_thread_id = int(kernel32.GetCurrentThreadId())
         if not user32.RegisterHotKey(None, HOTKEY_ID, MOD_CONTROL | MOD_ALT, VK_D):
-            self.signals.error.emit("Hotkey in use (already open?)")
+            self.signals.error.emit("Hotkey used by another app")
             return
         msg = MSG()
         try:
@@ -903,7 +905,23 @@ class DictationWindow(QWidget):
         event.accept()
 
 
+def focus_running_instance() -> bool:
+    """If the app is already open, bring that window to the front and return True."""
+    # The mutex handle is never closed on purpose: Windows releases it when this process exits.
+    win_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    win_kernel32.CreateMutexW(None, False, "DictationTyper.SingleInstance")
+    if ctypes.get_last_error() != ERROR_ALREADY_EXISTS:
+        return False
+    hwnd = user32.FindWindowW(None, "Dictation Typer")
+    if hwnd:
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.SetForegroundWindow(hwnd)
+    return True
+
+
 def main() -> int:
+    if focus_running_instance():
+        return 0
     # pythonw has no console, so errors would otherwise vanish; this file is what to check when something fails.
     logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     sys.excepthook = lambda *exc: logging.error("Unhandled error", exc_info=exc)
