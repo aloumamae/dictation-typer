@@ -49,6 +49,7 @@ ICON_FILE = APP_DIR / "assets" / "icon.ico"
 API_KEYS_URL = "https://www.assemblyai.com/dashboard"
 
 CHUNK_SIZE = 4096
+IDLE_PAUSE_SECONDS = 30  # stop recording after this long with nothing transcribed
 DEFAULT_SPEECH_MODEL = "universal-streaming-multilingual"
 ENGLISH_SPEECH_MODEL = "universal-streaming-english"
 HOTKEY_ID = 0xD17A
@@ -394,6 +395,11 @@ class DictationWindow(QWidget):
         self.stream_failed = False
         self.stopping = False
         self.error_text = ""
+        self.auto_paused = False
+        self.idle_timer = QTimer(self)
+        self.idle_timer.setSingleShot(True)
+        self.idle_timer.setInterval(IDLE_PAUSE_SECONDS * 1000)
+        self.idle_timer.timeout.connect(self.on_idle)
 
         self.signals = AppSignals()
         self.signals.toggle.connect(self.toggle_recording)
@@ -701,7 +707,11 @@ class DictationWindow(QWidget):
             self.toggle_settings()
         self.error_text = ""
         self.hint_label.setToolTip("")
-        self.session_transcript = []
+        # After an auto-pause, recording again continues the same text (a manual stop starts fresh).
+        # ponytail: history then holds both the paused part and the full text; dedupe if it bothers.
+        if not self.auto_paused:
+            self.session_transcript = []
+        self.auto_paused = False
         self.current_partial = ""
         self.current_textbox_height = 0
         self.current_shell_height = 0
@@ -713,6 +723,7 @@ class DictationWindow(QWidget):
         self.waveform.reset()
         self.set_record_style(True)
         self.set_status("Connecting...", "#f3f4f6")
+        self.idle_timer.start()
         threading.Thread(target=self.recording_worker, daemon=True).start()
 
     def recording_worker(self) -> None:
@@ -781,12 +792,14 @@ class DictationWindow(QWidget):
         self.waveform.add_level(level)
 
     def on_partial(self, text: str) -> None:
+        self.idle_timer.start()  # restarts the countdown
         self.current_partial = text
         self.refresh_inline_transcript()
         self.set_status("Listening...", "#bfdbfe")
         self.hint_label.setText("Speaking...")
 
     def on_final(self, text: str) -> None:
+        self.idle_timer.start()
         self.current_partial = ""
         clean = self.normalize_text(text)
         if clean:
@@ -838,6 +851,7 @@ class DictationWindow(QWidget):
     def on_stopped(self) -> None:
         self.is_recording = False
         self.stopping = False
+        self.idle_timer.stop()
         self.finish_session()
         self.english_button.setEnabled(True)
         self.waveform.is_recording = False
@@ -846,8 +860,18 @@ class DictationWindow(QWidget):
         if self.error_text:
             self.show_error()
             return
+        if self.auto_paused:
+            self.set_status("Paused", "#fbbf24")
+            self.hint_label.setText(f"no speech for {IDLE_PAUSE_SECONDS}s")
+            return
         self.set_status("Ready", "#f3f4f6")
         self.hint_label.setText("Ctrl+Alt+D")
+
+    def on_idle(self) -> None:
+        # Nothing transcribed for IDLE_PAUSE_SECONDS (muted mic, left recording): stop paying for the stream.
+        if self.is_recording:
+            self.auto_paused = True
+            self.stop_recording()
 
     def set_status(self, text: str, hint: str) -> None:
         self.status_label.setText(text)
