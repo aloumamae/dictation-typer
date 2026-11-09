@@ -1,9 +1,33 @@
 """Self-update check. Run: .venv\\Scripts\\python.exe test_update.py"""
+import io
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 
 import qt_main
+
+assert qt_main.parse_version("v0.10.0") > qt_main.parse_version("0.9.1")
+
+# Zip installs: a release zip overwrites the code but keeps the user's files.
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+    app = Path(tmp, "app")
+    app.mkdir()
+    (app / "code.txt").write_text("old")
+    (app / "config.json").write_text('{"api_key": "secret"}')
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("owner-repo-abc123/", "")
+        archive.writestr("owner-repo-abc123/code.txt", "new")
+        archive.writestr("owner-repo-abc123/assets/icon.ico", "icon")
+        archive.writestr("owner-repo-abc123/../escape.txt", "evil")
+    qt_main.extract_release(buffer.getvalue(), app)
+    assert (app / "code.txt").read_text() == "new"
+    assert (app / "assets" / "icon.ico").read_text() == "icon"
+    assert (app / "config.json").read_text() == '{"api_key": "secret"}', "user config must survive"
+    assert not Path(tmp, "escape.txt").exists(), "zip must not write outside the app folder"
+
+# Git installs: fast-forward pull.
 
 
 def git(cwd, *args):

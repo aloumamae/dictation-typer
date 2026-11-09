@@ -1,5 +1,6 @@
 import ctypes
 from ctypes import wintypes
+import io
 import json
 import logging
 import math
@@ -10,6 +11,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
+import zipfile
 
 from assemblyai.streaming.v3 import (
     StreamingClient,
@@ -36,6 +39,8 @@ from PySide6.QtWidgets import (
 )
 
 
+VERSION = "0.2.0"  # bump together with the GitHub release tag (v0.2.0)
+REPO = "aloumamae/dictation-typer"
 APP_DIR = Path(__file__).resolve().parent
 LOCAL_CONFIG = APP_DIR / "config.json"
 HISTORY_DIR = APP_DIR / "history"
@@ -132,13 +137,57 @@ def install_requirements() -> None:
     shutil.copyfile(requirements, marker)
 
 
-def self_update() -> bool:
-    """Fast-forward a git clone to the latest published version. Returns True when new code was pulled.
+def parse_version(tag: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in tag.lstrip("v").split("."))
 
-    config.json, history/ and dictation.log are git-ignored, so the user's key and settings survive.
+
+def github_get(url: str, timeout: int) -> bytes:
+    request = urllib.request.Request(url, headers={"User-Agent": "dictation-typer"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def newer_release() -> dict | None:
+    """The latest GitHub release, if it is newer than this copy."""
+    try:
+        release = json.loads(github_get(f"https://api.github.com/repos/{REPO}/releases/latest", timeout=10))
+        return release if parse_version(release["tag_name"]) > parse_version(VERSION) else None
+    except Exception as exc:  # offline, rate limited, odd tag
+        logging.warning("Update check skipped: %s", exc)
+        return None
+
+
+def extract_release(archive_bytes: bytes, app_dir: Path) -> None:
+    """Copy a GitHub source zip over the app folder.
+
+    User files (config.json, history/, dictation.log, .venv) are not in the zip, so they are kept.
+    ponytail: files removed upstream stay behind; harmless while nothing imports them.
     """
-    if not (APP_DIR / ".git").exists():
-        return False  # downloaded as a zip: nothing to pull
+    root = app_dir.resolve()
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+        for entry in archive.infolist():
+            relative = entry.filename.partition("/")[2]  # drop the "<owner>-<repo>-<sha>/" top folder
+            target = (root / relative).resolve()
+            if entry.is_dir() or not relative or not target.is_relative_to(root):
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(archive.read(entry))
+
+
+def apply_update(release: dict) -> bool:
+    if (APP_DIR / ".git").exists():
+        return self_update()
+    try:
+        extract_release(github_get(release["zipball_url"], timeout=120), APP_DIR)
+        install_requirements()
+        return True
+    except Exception:
+        logging.exception("Update failed")
+        return False
+
+
+def self_update() -> bool:
+    """Fast-forward a git clone. Returns True when new code was pulled."""
     try:
         if run_quiet("git", "status", "--porcelain", "--untracked-files=no").stdout.strip():
             return False  # local edits to the code: leave a developer's checkout alone
@@ -238,7 +287,8 @@ class AppSignals(QObject):
     status = Signal(str, str)
     error = Signal(str)
     stopped = Signal()
-    updated = Signal()
+    update_available = Signal(object)
+    update_finished = Signal(bool)
 
 
 class GearButton(QPushButton):
@@ -356,8 +406,10 @@ class DictationWindow(QWidget):
 
         self.build_ui()
         self.start_hotkey_listener()
-        self.signals.updated.connect(self.on_updated)
-        threading.Thread(target=lambda: self_update() and self.signals.updated.emit(), daemon=True).start()
+        self.pending_release = None
+        self.signals.update_available.connect(self.on_update_available)
+        self.signals.update_finished.connect(self.on_update_finished)
+        threading.Thread(target=self.update_check_worker, daemon=True).start()
         if not self.api_key:
             self.toggle_settings()
 
@@ -425,6 +477,26 @@ class DictationWindow(QWidget):
         header.addWidget(self.minimize_button, 0, Qt.AlignTop)
         header.addWidget(self.close_button, 0, Qt.AlignTop)
         layout.addLayout(header)
+
+        self.update_bar = QFrame()
+        update_row = QHBoxLayout(self.update_bar)
+        update_row.setContentsMargins(2, 0, 0, 0)
+        self.update_label = QLabel()
+        self.update_label.setStyleSheet("color: #7dd3fc; font: 10px 'Segoe UI';")
+        update_now = QPushButton("update")
+        update_now.clicked.connect(self.start_update)
+        update_now.setStyleSheet(self.action_style())
+        update_now.setFixedSize(44, 18)
+        update_later = QPushButton("later")
+        update_later.clicked.connect(self.dismiss_update)
+        update_later.setStyleSheet(self.language_style())
+        update_later.setFixedSize(34, 18)
+        update_row.addWidget(self.update_label)
+        update_row.addStretch(1)
+        update_row.addWidget(update_now)
+        update_row.addWidget(update_later)
+        self.update_bar.hide()
+        layout.addWidget(self.update_bar)
 
         self.waveform = Waveform()
         layout.addWidget(self.waveform)
@@ -722,10 +794,34 @@ class DictationWindow(QWidget):
         self.refresh_inline_transcript()
         self.set_status("Recording", "#bbf7d0")
 
-    def on_updated(self) -> None:
-        # The new code is already on disk; it runs from the next launch.
-        if not self.is_recording and not self.error_text:
-            self.set_status("Updated", "reopen to apply")
+    def update_check_worker(self) -> None:
+        release = newer_release()
+        if release:
+            self.signals.update_available.emit(release)
+
+    def on_update_available(self, release: dict) -> None:
+        self.pending_release = release
+        self.update_label.setText(f"{release['tag_name']} available")
+        self.update_bar.show()
+        self.fit_height()
+
+    def dismiss_update(self) -> None:
+        self.update_bar.hide()
+        self.fit_height()
+
+    def start_update(self) -> None:
+        self.dismiss_update()
+        self.set_status("Updating...", "#bfdbfe")
+        threading.Thread(target=lambda: self.signals.update_finished.emit(apply_update(self.pending_release)), daemon=True).start()
+
+    def on_update_finished(self, ok: bool) -> None:
+        if not ok:
+            self.set_status("Update failed", "#fca5a5")
+            self.hint_label.setText("see dictation.log")
+            return
+        # Relaunch the new code; it waits for this process to exit (see focus_running_instance).
+        subprocess.Popen([sys.executable, str(APP_DIR / "qt_main.py"), "--after-update"], cwd=APP_DIR)
+        self.close()
 
     def on_error(self, text: str) -> None:
         logging.error(text)
@@ -905,13 +1001,20 @@ class DictationWindow(QWidget):
         event.accept()
 
 
-def focus_running_instance() -> bool:
-    """If the app is already open, bring that window to the front and return True."""
-    # The mutex handle is never closed on purpose: Windows releases it when this process exits.
+def focus_running_instance(wait: bool = False) -> bool:
+    """If the app is already open, bring that window to the front and return True.
+
+    wait=True (relaunch after an update) gives the old process a few seconds to exit first.
+    """
     win_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    win_kernel32.CreateMutexW(None, False, "DictationTyper.SingleInstance")
-    if ctypes.get_last_error() != ERROR_ALREADY_EXISTS:
-        return False
+    win_kernel32.CreateMutexW.restype = wintypes.HANDLE
+    win_kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    for _ in range(50 if wait else 1):
+        handle = win_kernel32.CreateMutexW(None, False, "DictationTyper.SingleInstance")
+        if ctypes.get_last_error() != ERROR_ALREADY_EXISTS:
+            return False  # handle kept open on purpose: Windows releases it when this process exits
+        win_kernel32.CloseHandle(handle)
+        time.sleep(0.1)
     hwnd = user32.FindWindowW(None, "Dictation Typer")
     if hwnd:
         user32.ShowWindow(hwnd, SW_RESTORE)
@@ -920,7 +1023,7 @@ def focus_running_instance() -> bool:
 
 
 def main() -> int:
-    if focus_running_instance():
+    if focus_running_instance(wait="--after-update" in sys.argv):
         return 0
     # pythonw has no console, so errors would otherwise vanish; this file is what to check when something fails.
     logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
