@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 
-VERSION = "0.2.0"  # bump together with the GitHub release tag (v0.2.0)
+VERSION = "0.2.1"  # bump together with the GitHub release tag (v0.2.1)
 REPO = "aloumamae/dictation-typer"
 APP_DIR = Path(__file__).resolve().parent
 LOCAL_CONFIG = APP_DIR / "config.json"
