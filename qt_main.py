@@ -5,6 +5,8 @@ import logging
 import math
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -108,6 +110,50 @@ def load_speech_model() -> str:
     return DEFAULT_SPEECH_MODEL
 
 
+def run_quiet(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        args, cwd=APP_DIR, capture_output=True, text=True, timeout=timeout,
+        creationflags=subprocess.CREATE_NO_WINDOW, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+
+
+def install_requirements() -> None:
+    # Same marker start_dictation.bat uses: reinstall only when requirements.txt changed.
+    requirements = APP_DIR / "requirements.txt"
+    marker = Path(sys.prefix) / "requirements.installed"
+    if sys.prefix == sys.base_prefix or (marker.exists() and marker.read_bytes() == requirements.read_bytes()):
+        return
+    result = run_quiet(sys.executable, "-m", "pip", "install", "-r", str(requirements), timeout=600)
+    if result.returncode:
+        logging.error("Dependency update failed: %s", result.stderr.strip())
+        return
+    shutil.copyfile(requirements, marker)
+
+
+def self_update() -> bool:
+    """Fast-forward a git clone to the latest published version. Returns True when new code was pulled.
+
+    config.json, history/ and dictation.log are git-ignored, so the user's key and settings survive.
+    """
+    if not (APP_DIR / ".git").exists():
+        return False  # downloaded as a zip: nothing to pull
+    try:
+        if run_quiet("git", "status", "--porcelain", "--untracked-files=no").stdout.strip():
+            return False  # local edits to the code: leave a developer's checkout alone
+        before = run_quiet("git", "rev-parse", "HEAD").stdout
+        result = run_quiet("git", "pull", "--ff-only", "--quiet")
+        if result.returncode:
+            logging.warning("Update skipped: %s", result.stderr.strip())
+            return False
+        if run_quiet("git", "rev-parse", "HEAD").stdout == before:
+            return False
+        install_requirements()
+        return True
+    except (OSError, subprocess.SubprocessError) as exc:  # git missing, offline timeout
+        logging.warning("Update skipped: %s", exc)
+        return False
+
+
 class AudioRecorder:
     def __init__(self) -> None:
         self.p = pyaudio.PyAudio()
@@ -190,6 +236,7 @@ class AppSignals(QObject):
     status = Signal(str, str)
     error = Signal(str)
     stopped = Signal()
+    updated = Signal()
 
 
 class GearButton(QPushButton):
@@ -307,6 +354,8 @@ class DictationWindow(QWidget):
 
         self.build_ui()
         self.start_hotkey_listener()
+        self.signals.updated.connect(self.on_updated)
+        threading.Thread(target=lambda: self_update() and self.signals.updated.emit(), daemon=True).start()
         if not self.api_key:
             self.toggle_settings()
 
@@ -670,6 +719,11 @@ class DictationWindow(QWidget):
             self.session_transcript.append(clean)
         self.refresh_inline_transcript()
         self.set_status("Recording", "#bbf7d0")
+
+    def on_updated(self) -> None:
+        # The new code is already on disk; it runs from the next launch.
+        if not self.is_recording and not self.error_text:
+            self.set_status("Updated", "reopen to apply")
 
     def on_error(self, text: str) -> None:
         logging.error(text)
