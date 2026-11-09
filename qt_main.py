@@ -308,10 +308,10 @@ class DictationWindow(QWidget):
 
         header = QHBoxLayout()
         header.setSpacing(9)
-        self.record_button = QPushButton("")
+        self.record_button = QPushButton()
         self.record_button.setFixedSize(34, 34)
         self.record_button.clicked.connect(self.toggle_recording)
-        self.record_button.setStyleSheet(self.circle_style("#ef4444", "#dc2626", 17))
+        self.set_record_style(False)
         header.addWidget(self.record_button)
 
         labels = QVBoxLayout()
@@ -441,6 +441,19 @@ class DictationWindow(QWidget):
         layout.addWidget(self.settings_panel)
         QTimer.singleShot(0, self.refresh_inline_transcript)
 
+    def set_record_style(self, recording: bool) -> None:
+        # Idle: dark button with a red record dot. Recording: red button with a stop square.
+        if recording:
+            glyph, color, background, hover, size = chr(0x25A0), "#ffffff", "#ef4444", "#dc2626", 13
+        else:
+            glyph, color, background, hover, size = chr(0x25CF), "#ef4444", "#1f2330", "#2a3040", 18
+        self.record_button.setText(glyph)
+        self.record_button.setStyleSheet(
+            f"QPushButton {{ background: {background}; color: {color}; border: 1px solid #2a2d35;"
+            f" border-radius: 17px; font: {size}px 'Segoe UI Symbol'; padding: 0 0 2px 0; }}"
+            f" QPushButton:hover {{ background: {hover}; }}"
+        )
+
     def circle_style(self, color: str, hover: str, radius: int) -> str:
         return f"QPushButton {{ background: {color}; border: 0; border-radius: {radius}px; }} QPushButton:hover {{ background: {hover}; }}"
 
@@ -543,7 +556,7 @@ class DictationWindow(QWidget):
         self.english_button.setEnabled(False)
         self.waveform.is_recording = True
         self.waveform.reset()
-        self.record_button.setStyleSheet(self.circle_style("#22c55e", "#16a34a", 17))
+        self.set_record_style(True)
         self.set_status("Connecting...", "#f3f4f6")
         threading.Thread(target=self.recording_worker, daemon=True).start()
 
@@ -645,7 +658,7 @@ class DictationWindow(QWidget):
         self.english_button.setEnabled(True)
         self.waveform.is_recording = False
         self.waveform.reset()
-        self.record_button.setStyleSheet(self.circle_style("#ef4444", "#dc2626", 17))
+        self.set_record_style(False)
         if self.error_text:
             self.show_error()
             return
